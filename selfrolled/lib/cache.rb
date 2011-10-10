@@ -3,13 +3,15 @@
 require 'yaml'
 require 'thread'
 require 'pp'
+require 'cache/exceptions'
+require 'cache/plugins'
 
 # This class represents a cache object.
 # 
 class Cache
   include Enumerable
 
-  VERSION = 1
+  API_VERSION = 1
 
   # Create a new cache object
   #
@@ -17,10 +19,29 @@ class Cache
   #     * file - filename to store cache data in
   #       * mandatory
   #       * should be a valid path, and writeable
+  #     * default_ttl - the default ttl to apply to all entries if not otherwise
+  #                     specified
+  #       * optional
+  #       * should be a valid ttl
   #
   def initialize(options = {})
-    # storage for cache_file
-    @cache_file = options[:file]
+    # TODO: validate options
+
+    # Check mandatory options
+    [:file].each do |opt|
+      unless options.include?(opt)
+        raise Cache::ParameterException.new("The :#{opt} option is a mandatory option during creation of a Cache object")
+      end
+    end
+
+    # Store passed options
+    @options = options
+
+    # Default TTL is 0 by default to disable caching unless asked
+    @options[:default_ttl] ||= 0
+
+    # Load plugins: best do this after validation
+    load_plugins
 
     # This is our in memory data storage hash.
     #
@@ -32,12 +53,13 @@ class Cache
     #
     # TODO: have a wash or validation routine that checks validatity
     @data = {
-      :version => Cache::VERSION,
+      :version => VERSION,
       :cache => {}
     }
 
     # semaphore to use for data access
     @data_lock = Mutex.new
+
   end
 
   # Store a value in the cache
@@ -59,16 +81,24 @@ class Cache
   #       * if nil or 0 don't cache
   #       * if -1 cache forever
   #       * otherwise only positive integers
+  #       * default is 0
   #
   def store(key, data, options = {})
     # TODO: validation of params & key
+
+    # Set some defaults
+
+    # Configure the :ttl option to align with the cache objects 
+    # :default_ttl if :ttl is not provided.
+    options[:ttl] ||= cache_options[:default_ttl]
+    options[:time_updated] ||= current_time
 
     # Changes to the hash keys are synchronised using a mutex
     # specific to this cache object
     @data_lock.synchronize do
       cache_data[key] = {
         :data => data,
-        :stored => current_time,
+        :time_updated => options[:time_updated],
         :ttl => options[:ttl]
       }
     end
@@ -85,16 +115,26 @@ class Cache
   #     *
   #
   def retrieve(key, options = {})
+    # TODO: validate key
     # TODO: validation and defaults for options
     # TODO: validation for key
+
+    # First check if the key exists and raise an exception if it does not
+    unless entry_exists?(key)
+      raise Cache::EntryMissing.new("The entry #{key} cannot be found in the internal cache data store")
+    end
+
+    if entry_expired?(cache_data[key][:time_updated], cache_data[key][:ttl])
+      raise Cache::EntryExpired.new("The entry #{key} has expired")
+    end
 
     cache_data[key][:data]
   end
 
-  # Version
+  # Return the options set for this object
   #
-  def data_version
-    @data[:version]
+  def cache_options
+    @options
   end
 
   private
@@ -110,6 +150,28 @@ class Cache
   #
   def cache_data
     @data[:cache]
+  end
+
+  # Using the epoch as the creation time, ttl as the time to live
+  # and current_time as the current time, return a boolean telling
+  # me if this combination has expired or not.
+  #
+  def entry_expired?(epoch, ttl)
+    if current_time - epoch > ttl
+      return true
+    else
+      return false
+    end
+  end
+
+  # Check if the entry exists in the data store
+  def entry_exists?(key)
+    cache_data.include?(key)    
+  end
+
+  # Load plugins
+  def load_plugins
+    plugins = Cache::Plugins.new
   end
 
 end
